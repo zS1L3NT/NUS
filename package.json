@@ -1,0 +1,15 @@
+{
+  "name": "nus-canvas-cli-sync",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Deterministic, read-only NUS Canvas corpus builder using canvas-cli.",
+  "scripts": {
+    "doctor": "node src/sync.mjs doctor",
+    "sync": "node src/sync.mjs sync",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

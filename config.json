@@ -1,0 +1,19 @@
+{
+  "canvasBinary": "tools/canvas-cli/current/canvas",
+  "canvasInstance": "nus",
+  "archiveDirectory": "archive",
+  "knownContent": "known-content.json",
+  "timezone": "Asia/Singapore",
+  "downloadFiles": true,
+  "extractText": true,
+  "maxFileBytes": 1073741824,
+  "maxTextSourceBytes": 104857600,
+  "courses": [
+    { "code": "CFG1002", "id": 93575, "name": "Career Catalyst" },
+    { "code": "CFG1004", "id": 93585, "name": "Financial Readiness for Young Professionals" },
+    { "code": "CS1231S", "id": 93684, "name": "Discrete Structures" },
+    { "code": "CS2030S", "id": 93698, "name": "Programming Methodology II" },
+    { "code": "ES1103", "id": 94109, "name": "English for Academic Purposes" },
+    { "code": "GEA1000", "id": 94257, "name": "Quantitative Reasoning with Data" }
+  ]
+}
