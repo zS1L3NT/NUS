@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, rename, stat } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
-  atomicWrite, compareStates, documentRecord, extractText, formatDate, htmlToMarkdown,
-  readJson, safeName, sha256File, slug, stableJson, stateFromDocuments, writeJson,
+  atomicWrite, canvasAssignmentOrder, canvasModuleOrder, collisionSafeNames, compareStates,
+  documentRecord, extractText, formatDate, htmlToMarkdown, orderPrefix,
+  preserveIncompleteState, readJson, safeName, sha256File, stableJson, stateFromDocuments, writeJson,
 } from './lib.mjs';
 
 const execFileAsync = promisify(execFile);
@@ -124,11 +125,12 @@ async function collectCourse(config, configuredCourse) {
   const modules = await collectResource(config, warnings, 'module', ['modules', 'list', '--course-id', String(courseId), '--include', 'items,content_details']);
   const listedPages = await collectResource(config, warnings, 'page-list', ['pages', 'list', '--course-id', String(courseId), '--include', 'body']);
   const pages = await supplementPages(config, warnings, courseId, modules, listedPages, configuredCourse.knownContent);
-  const assignments = await collectResource(config, warnings, 'assignment', ['assignments', 'list', '--course-id', String(courseId)]);
+  const assignmentGroups = await collectResource(config, warnings, 'assignment-group-list', ['assignment-groups', 'list', '--course-id', String(courseId)]);
+  const assignments = await collectResource(config, warnings, 'assignment-list', ['assignments', 'list', '--course-id', String(courseId)]);
   const assignmentOverrides = {};
   for (const assignment of assignments) {
     assignmentOverrides[assignment.id] = await collectResource(
-      config, warnings, 'assignment',
+      config, warnings, 'assignment-override',
       ['overrides', 'list', '--course-id', String(courseId), '--assignment-id', String(assignment.id)],
     );
   }
@@ -138,7 +140,7 @@ async function collectCourse(config, configuredCourse) {
   const folders = await collectResource(config, warnings, 'file-list', ['folders', 'list', '--course-id', String(courseId)]);
   const listedFiles = await collectResource(config, warnings, 'file-list', ['files', 'list', '--course-id', String(courseId)]);
   const files = await supplementFiles(config, warnings, { course, modules, pages, assignments, announcements, quizzes, calendarEvents }, listedFiles, configuredCourse.knownContent);
-  return sanitizeCanvasSecrets({ configuredCourse, course, modules, pages, assignments, assignmentOverrides, announcements, files, folders, quizzes, calendarEvents, warnings });
+  return sanitizeCanvasSecrets({ configuredCourse, course, modules, pages, assignments, assignmentGroups, assignmentOverrides, announcements, files, folders, quizzes, calendarEvents, warnings });
 }
 
 function folderPath(file, folders) {
@@ -155,16 +157,94 @@ async function existingFileMatches(filePath, size) {
   }
 }
 
+async function pathExists(filePath) {
+  try {
+    await stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function migratePath(courseDirectory, oldRelativePath, newRelativePath) {
+  if (!oldRelativePath || oldRelativePath === newRelativePath) return;
+  const oldPath = path.join(courseDirectory, oldRelativePath);
+  const newPath = path.join(courseDirectory, newRelativePath);
+  if (!(await pathExists(oldPath)) || await pathExists(newPath)) return;
+  await mkdir(path.dirname(newPath), { recursive: true });
+  await rename(oldPath, newPath);
+}
+
+async function unlinkArchivedPath(courseDirectory, relativePath) {
+  if (!relativePath) return false;
+  try {
+    await unlink(path.join(courseDirectory, relativePath));
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function cleanupGeneratedDocuments(courseDirectory, documents, incompleteKinds) {
+  const incomplete = new Set(incompleteKinds);
+  for (const kind of ['page', 'assignment', 'announcement', 'module']) {
+    if (incomplete.has(kind)) continue;
+    const directory = path.join(courseDirectory, 'documents', `${kind}s`);
+    let names;
+    try {
+      names = await readdir(directory);
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+    const expected = new Set(documents
+      .filter((document) => document.kind === kind && document.local_path)
+      .map((document) => path.basename(document.local_path)));
+    for (const name of names) {
+      if (path.extname(name).toLocaleLowerCase('en') !== '.md' || expected.has(name)) continue;
+      await unlink(path.join(directory, name));
+    }
+  }
+}
+
+function groupedCollisionNames(items, groupForItem, nameForItem, idForItem) {
+  const names = new Map();
+  const groups = new Map();
+  for (const item of items) {
+    const key = groupForItem(item);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(item);
+  }
+  for (const groupItems of groups.values()) {
+    for (const [item, name] of collisionSafeNames(groupItems, nameForItem, idForItem)) names.set(item, name);
+  }
+  return names;
+}
+
 async function archiveFiles(config, data, courseDirectory, options) {
   const manifestPath = path.join(courseDirectory, 'file-manifest.json');
   const previous = await readJson(manifestPath, { files: {} });
-  const manifest = { course: data.configuredCourse.code, files: {} };
+  const fileListIncomplete = data.warnings.some((warning) => warning.kind === 'file-list');
+  const manifest = {
+    course: data.configuredCourse.code,
+    files: fileListIncomplete ? { ...(previous.files || {}) } : {},
+  };
   const entries = [];
+  const moduleOrder = canvasModuleOrder(data.modules);
+  const displayNames = groupedCollisionNames(
+    data.files,
+    (file) => folderPath(file, data.folders).toLocaleLowerCase('en'),
+    (file) => file.display_name || file.filename || `file-${file.id}`,
+    (file) => file.id,
+  );
   for (const file of [...data.files].sort((left, right) => left.id - right.id)) {
     const displayName = file.display_name || file.filename || `file-${file.id}`;
-    const relativePath = path.join('files', folderPath(file, data.folders), `${file.id}-${safeName(displayName)}`);
+    const orderedName = `${orderPrefix(moduleOrder.fileRanks.get(Number(file.id)))}${displayNames.get(file)}`;
+    const relativePath = path.join('files', folderPath(file, data.folders), orderedName);
     const destination = path.join(courseDirectory, relativePath);
     const old = previous.files?.[file.id];
+    await migratePath(courseDirectory, old?.local_path, relativePath);
     const matches = await existingFileMatches(destination, file.size);
     let status = 'metadata-only';
     let contentSha256 = old?.content_sha256 ?? '';
@@ -192,7 +272,8 @@ async function archiveFiles(config, data, courseDirectory, options) {
     if (options.downloadFiles && matches && !contentSha256) contentSha256 = await sha256File(destination);
 
     let text = old?.text ?? { status: 'not-requested', bytes: 0 };
-    const textRelativePath = path.join('text', 'files', folderPath(file, data.folders), `${file.id}-${safeName(displayName)}.txt`);
+    const textRelativePath = path.join('text', 'files', folderPath(file, data.folders), `${orderedName}.txt`);
+    await migratePath(courseDirectory, old?.text_path, textRelativePath);
     if (options.extractText && (status === 'downloaded' || status === 'unchanged' || status === 'legacy-preserved')) {
       const textDestination = path.join(courseDirectory, textRelativePath);
       if (status === 'downloaded' || !(await existingFileMatches(textDestination, old?.text?.file_bytes))) {
@@ -240,6 +321,16 @@ async function archiveFiles(config, data, courseDirectory, options) {
     entries.push(entry);
     await writeJson(manifestPath, manifest);
   }
+  if (!fileListIncomplete) {
+    const currentIds = new Set(data.files.map((file) => String(file.id)));
+    for (const [fileId, old] of Object.entries(previous.files || {})) {
+      if (currentIds.has(String(fileId))) continue;
+      for (const oldPath of [
+        old.local_path, old.text_path,
+        old.legacy_preserved?.local_path, old.legacy_preserved?.text_path,
+      ]) await unlinkArchivedPath(courseDirectory, oldPath);
+    }
+  }
   await writeJson(manifestPath, manifest);
   return entries;
 }
@@ -262,9 +353,21 @@ function assignmentDates(assignment, overrides) {
   return dates;
 }
 
-async function buildDocuments(config, data, courseDirectory, fileEntries) {
+async function buildDocuments(config, data, courseDirectory, fileEntries, previousState) {
   const code = data.configuredCourse.code;
   const documents = [];
+  const moduleOrder = canvasModuleOrder(data.modules);
+  const assignmentOrder = data.warnings.some((warning) => ['assignment-list', 'assignment-group-list'].includes(warning.kind))
+    ? new Map()
+    : canvasAssignmentOrder(data.assignments, data.assignmentGroups);
+  const pageNames = collisionSafeNames(data.pages, (page) => `${safeName(page.title)}.md`, (page) => page.page_id || page.url);
+  const assignmentNames = collisionSafeNames(data.assignments, (assignment) => `${safeName(assignment.name)}.md`, (assignment) => assignment.id);
+  const announcementNames = collisionSafeNames(data.announcements, (announcement) => `${safeName(announcement.title)}.md`, (announcement) => announcement.id);
+  const moduleNames = collisionSafeNames(data.modules, (module) => `${safeName(module.name)}.md`, (module) => module.id);
+  const migrateDocument = async (kind, id, localPath) => {
+    const old = previousState?.[`${code}:${kind}:${id}`];
+    await migratePath(courseDirectory, old?.local_path, localPath);
+  };
   documents.push(documentRecord({
     id: data.course.id, kind: 'course', course: code, title: data.course.name,
     sourceUrl: `https://canvas.nus.edu.sg/courses/${data.course.id}`,
@@ -273,7 +376,8 @@ async function buildDocuments(config, data, courseDirectory, fileEntries) {
   }));
   for (const page of data.pages) {
     const content = htmlToMarkdown(page.body || '');
-    const localPath = `documents/pages/${page.page_id || page.url}-${slug(page.title)}.md`;
+    const localPath = path.posix.join('documents/pages', `${orderPrefix(moduleOrder.pageRanks.get(String(page.url)))}${pageNames.get(page)}`);
+    await migrateDocument('page', page.page_id || page.url, localPath);
     await atomicWrite(path.join(courseDirectory, localPath), `# ${page.title}\n\n${content}`);
     documents.push(documentRecord({
       id: page.page_id || page.url, kind: 'page', course: code, title: page.title,
@@ -285,7 +389,8 @@ async function buildDocuments(config, data, courseDirectory, fileEntries) {
   for (const assignment of data.assignments) {
     const content = htmlToMarkdown(assignment.description || '');
     const dates = assignmentDates(assignment, data.assignmentOverrides[assignment.id]);
-    const localPath = `documents/assignments/${assignment.id}-${slug(assignment.name)}.md`;
+    const localPath = path.posix.join('documents/assignments', `${orderPrefix(assignmentOrder.get(Number(assignment.id)))}${assignmentNames.get(assignment)}`);
+    await migrateDocument('assignment', assignment.id, localPath);
     const dateLines = dates.map((date) => `- ${date.audience}: ${date.due_at || 'no due date'}`).join('\n');
     await atomicWrite(path.join(courseDirectory, localPath), `# ${assignment.name}\n\n## Dates\n\n${dateLines || '- No dated variants'}\n\n${content}`);
     documents.push(documentRecord({
@@ -297,9 +402,11 @@ async function buildDocuments(config, data, courseDirectory, fileEntries) {
       }, content,
     }));
   }
-  for (const announcement of data.announcements) {
+  const sortedAnnouncements = [...data.announcements].sort((left, right) => new Date(left.posted_at || 0) - new Date(right.posted_at || 0));
+  for (const [announcementIndex, announcement] of sortedAnnouncements.entries()) {
     const content = htmlToMarkdown(announcement.message || '');
-    const localPath = `documents/announcements/${announcement.id}-${slug(announcement.title)}.md`;
+    const localPath = path.posix.join('documents/announcements', `${orderPrefix(announcementIndex + 1)}${announcementNames.get(announcement)}`);
+    await migrateDocument('announcement', announcement.id, localPath);
     await atomicWrite(path.join(courseDirectory, localPath), `# ${announcement.title}\n\n${content}`);
     documents.push(documentRecord({
       id: announcement.id, kind: 'announcement', course: code, title: announcement.title,
@@ -309,8 +416,12 @@ async function buildDocuments(config, data, courseDirectory, fileEntries) {
   }
   for (const module of data.modules) {
     const lines = (module.items || []).map((item) => `${'  '.repeat(item.indent || 0)}- ${item.type}: ${item.title} ${item.html_url || item.external_url || ''}`);
+    const localPath = path.posix.join('documents/modules', `${orderPrefix(moduleOrder.moduleRanks.get(Number(module.id)))}${moduleNames.get(module)}`);
+    await migrateDocument('module', module.id, localPath);
+    await atomicWrite(path.join(courseDirectory, localPath), `# ${module.name}\n\n${lines.join('\n')}\n`);
     documents.push(documentRecord({
       id: module.id, kind: 'module', course: code, title: module.name,
+      localPath,
       metadata: { position: module.position, published: module.published, unlock_at: module.unlock_at },
       content: lines.join('\n'),
     }));
@@ -384,20 +495,34 @@ async function archiveCourse(config, data, options, collectedAt) {
   const courseDirectory = path.join(config.archiveDirectory, code);
   const rawDirectory = path.join(courseDirectory, 'raw');
   await mkdir(rawDirectory, { recursive: true });
-  for (const key of ['course', 'modules', 'pages', 'assignments', 'assignmentOverrides', 'announcements', 'files', 'folders', 'quizzes', 'calendarEvents', 'warnings']) {
+  for (const key of ['course', 'modules', 'pages', 'assignments', 'assignmentGroups', 'assignmentOverrides', 'announcements', 'files', 'folders', 'quizzes', 'calendarEvents', 'warnings']) {
     await writeJson(path.join(rawDirectory, `${key}.json`), data[key]);
   }
   const fileEntries = await archiveFiles(config, data, courseDirectory, options);
   await writeJson(path.join(rawDirectory, 'warnings.json'), data.warnings);
-  const documents = await buildDocuments(config, data, courseDirectory, fileEntries);
+  const statePath = path.join(courseDirectory, 'state.json');
+  const previousState = await readJson(statePath, {});
+  const documents = await buildDocuments(config, data, courseDirectory, fileEntries, previousState);
   const jsonl = documents.map((document) => stableJson(document, 0)).join('\n');
   await atomicWrite(path.join(courseDirectory, 'documents.jsonl'), `${jsonl}${jsonl ? '\n' : ''}`);
 
-  const statePath = path.join(courseDirectory, 'state.json');
-  const previousState = await readJson(statePath, {});
-  const state = stateFromDocuments(documents);
-  const incompleteKinds = [...new Set(data.warnings.map((warning) => warning.kind))];
+  const currentState = stateFromDocuments(documents);
+  const warningKinds = new Set(data.warnings.map((warning) => warning.kind));
+  const incompleteKinds = [
+    ['module', ['module']],
+    ['page', ['page-list', 'page']],
+    ['assignment', ['assignment-list']],
+    ['announcement', ['announcement']],
+    ['quiz', ['quiz-list']],
+    ['calendar', ['calendar']],
+    ['file', ['file-list']],
+  ].filter(([, kinds]) => kinds.some((kind) => warningKinds.has(kind))).map(([kind]) => kind);
+  const state = preserveIncompleteState(previousState, currentState, incompleteKinds);
   const changes = compareStates(previousState, state, incompleteKinds);
+  for (const change of changes.filter((change) => change.action === 'removed')) {
+    await unlinkArchivedPath(courseDirectory, previousState[change.document_id]?.local_path);
+  }
+  await cleanupGeneratedDocuments(courseDirectory, documents, incompleteKinds);
   await writeJson(statePath, state);
   await atomicWrite(path.join(courseDirectory, 'INDEX.md'), courseIndex(config, data, documents, fileEntries, collectedAt));
   return { code, data, documents, fileEntries, changes, baseline: Object.keys(previousState).length === 0 };
