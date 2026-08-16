@@ -33,7 +33,7 @@ async function loadConfig() {
     ...config,
     canvasBinary: resolvePath(config.canvasBinary, projectDirectory),
     rawDirectory: resolvePath(config.rawDirectory || './raw', projectDirectory),
-    viewDirectory: resolvePath(config.viewDirectory || '~/NUS', projectDirectory),
+    viewDirectory: resolvePath(config.viewDirectory || '~/NUS Canvas', projectDirectory),
     courses: config.courses.map((course) => ({ ...course, knownContent: knownContent[course.code] || {} })),
   };
 }

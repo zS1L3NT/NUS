@@ -4,15 +4,15 @@ This is the active, deterministic Canvas archiver. It uses the pinned `canvas-cl
 
 ## Output design
 
-Raw machine data stays in the repository under `./raw`; the Finder-facing view is written outside the repository under `~/NUS` by default. Change `rawDirectory` and `viewDirectory` in `config.json` to customize them:
+Raw machine data stays in the repository under `./raw`; the Finder-facing view is written outside the repository under `~/NUS Canvas` by default. Change `rawDirectory` and `viewDirectory` in `config.json` to customize them:
 
-- `~/NUS/<COURSE>/` is the Finder-facing Canvas-shaped view, with symlinked Modules, Quizzes, Assignments, Announcements, Files, and unlinked pages at its root;
+- `~/NUS Canvas/<COURSE>/` is the Finder-facing Canvas-shaped view, with symlinked Modules, Quizzes, Assignments, Announcements, Files, and unlinked pages at its root;
 - `raw/<COURSE>/` is machine-only: lossless Canvas responses, normalized records, manifests, state, and downloaded content;
 - `raw/<COURSE>/content/text/` contains deterministic text sidecars for supported text, HTML, PDF, Word, PowerPoint, Excel, ZIP, and OCR-readable image files;
 - `raw/<COURSE>/documents.jsonl` contains stable, normalized records for AI indexing;
 - `raw/<COURSE>/file-manifest.json` records original attachment metadata, hashes, and extraction status;
 - `raw/logs/latest.md` and `raw/logs/latest.json` report additions, modifications, and removals; timestamped older reports are kept under `raw/logs/older/`.
-- `~/NUS/logs/latest.md` is the Finder-facing change report; dated Markdown reports under `~/NUS/logs/older/` contain the readable history.
+- `~/NUS Canvas/logs/latest.md` is the Finder-facing change report; dated Markdown reports under `~/NUS Canvas/logs/older/` contain the readable history.
 
 ## Finder-friendly names and ordering
 

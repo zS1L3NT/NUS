@@ -2,7 +2,7 @@
   "canvasBinary": "tools/canvas-cli/current/canvas",
   "canvasInstance": "nus",
   "rawDirectory": "./raw",
-  "viewDirectory": "~/NUS",
+  "viewDirectory": "~/NUS Canvas",
   "knownContent": "known-content.json",
   "timezone": "Asia/Singapore",
   "downloadFiles": true,
