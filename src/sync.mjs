@@ -542,6 +542,16 @@ function appendWarning(lines, warning) {
   for (const line of messageLines) lines.push(`  ${line}`);
 }
 
+async function moveOlderLogs(logsDirectory, olderDirectory) {
+  await mkdir(olderDirectory, { recursive: true });
+  const historicalLogPattern = /^\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d(?:-\d+)?Z\.(?:json|md)$/;
+  const entries = await readdir(logsDirectory, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isFile() || !historicalLogPattern.test(entry.name)) continue;
+    await rename(path.join(logsDirectory, entry.name), path.join(olderDirectory, entry.name));
+  }
+}
+
 async function writeRunOutputs(config, results, startedAt) {
   const runId = startedAt.replace(/[:.]/g, '-');
   const completedAt = new Date().toISOString();
@@ -566,9 +576,11 @@ async function writeRunOutputs(config, results, startedAt) {
     }
   }
   const logsDirectory = path.join(config.archiveDirectory, 'logs');
-  await writeJson(path.join(logsDirectory, `${runId}.json`), run);
+  const olderDirectory = path.join(logsDirectory, 'older');
+  await moveOlderLogs(logsDirectory, olderDirectory);
+  await writeJson(path.join(olderDirectory, `${runId}.json`), run);
   await writeJson(path.join(logsDirectory, 'latest.json'), run);
-  await atomicWrite(path.join(logsDirectory, `${runId}.md`), `${lines.join('\n')}\n`);
+  await atomicWrite(path.join(olderDirectory, `${runId}.md`), `${lines.join('\n')}\n`);
   await atomicWrite(path.join(logsDirectory, 'latest.md'), `${lines.join('\n')}\n`);
 
   const rootLines = ['# NUS Canvas corpus (canvas-cli)', '', `Last updated: ${formatDate(completedAt, config.timezone)}`, '', '## Courses', ''];

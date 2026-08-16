@@ -12,7 +12,7 @@ The corpus is written to `archive/`:
 - `files/` contains original Canvas attachments;
 - `text/files/` contains deterministic text sidecars for supported text, HTML, PDF, Word, PowerPoint, Excel, ZIP, and OCR-readable image files;
 - `state.json` records stable hashes and metadata for comparisons;
-- `logs/latest.md` and `logs/latest.json` report additions, modifications, and removals.
+- `logs/latest.md` and `logs/latest.json` report additions, modifications, and removals; timestamped older reports are kept under `logs/older/`.
 
 ## Finder-friendly names and ordering
 
