@@ -4,23 +4,22 @@ This is the active, deterministic Canvas archiver. It uses the pinned `canvas-cl
 
 ## Output design
 
-The corpus is written to `archive/`:
+Raw machine data stays in the repository under `./raw`; the Finder-facing view is written outside the repository under `~/NUS` by default. Change `rawDirectory` and `viewDirectory` in `config.json` to customize them:
 
-- `raw/` preserves lossless structured Canvas responses;
-- `documents.jsonl` contains stable, normalized records for AI indexing;
-- `documents/` contains readable Markdown for pages, assignments, and announcements;
-- `files/` contains original Canvas attachments;
-- `text/files/` contains deterministic text sidecars for supported text, HTML, PDF, Word, PowerPoint, Excel, ZIP, and OCR-readable image files;
-- `state.json` records stable hashes and metadata for comparisons;
-- `logs/latest.md` and `logs/latest.json` report additions, modifications, and removals; timestamped older reports are kept under `logs/older/`.
+- `~/NUS/<COURSE>/` is the Finder-facing Canvas-shaped view, with symlinked Modules, Quizzes, Assignments, Announcements, Files, and unlinked pages at its root;
+- `raw/<COURSE>/` is machine-only: lossless Canvas responses, normalized records, manifests, state, and downloaded content;
+- `raw/<COURSE>/content/text/` contains deterministic text sidecars for supported text, HTML, PDF, Word, PowerPoint, Excel, ZIP, and OCR-readable image files;
+- `raw/<COURSE>/documents.jsonl` contains stable, normalized records for AI indexing;
+- `raw/<COURSE>/file-manifest.json` records original attachment metadata, hashes, and extraction status;
+- `raw/logs/latest.md` and `raw/logs/latest.json` report additions, modifications, and removals; timestamped older reports are kept under `raw/logs/older/`.
 
 ## Finder-friendly names and ordering
 
-- Canvas IDs are not placed at the front of filenames. An ID is appended only when two items in the same folder would otherwise have the same name.
-- Modules use their Canvas `position`. Pages and files referenced by modules use the order of their module items.
-- Assignments use assignment-group order followed by their position inside the group.
-- Announcements are numbered oldest first, so each later post gets a larger stable number without renaming earlier files.
-- Items without a lecturer-defined Canvas position are left unnumbered rather than implying an order Canvas did not provide.
+- The configured view tree uses Canvas module order and indentation, so it is the browsing side of the corpus.
+- Every Canvas folder and item view is numbered from `(001)` at its own level; child folders restart numbering at `(001)`.
+- The `raw/<COURSE>/content/` tree uses stable Canvas IDs and machine-oriented names; it is the backing side and is not intended for normal reading.
+- Pages, assignments, and files in the view tree point back to `raw/<COURSE>/content/` with relative symlinks, so each item has one source copy.
+- Online-only module items are represented by small Markdown link stubs.
 - After a complete Canvas listing, files and generated documents that Canvas has removed are deleted locally. Cleanup is skipped for a resource type whenever its Canvas listing is incomplete or fails.
 
 Credentials are not stored here. `canvas-cli` reads the API token from the macOS Keychain.
@@ -32,7 +31,10 @@ npm run doctor
 npm run sync
 npm run sync -- --course CS2030S
 npm run sync -- --metadata-only
+npm run rebuild-views
 npm test
 ```
+
+`npm run sync` is the full rebuild path: it reads Canvas, downloads missing raw attachments, writes normalized content, and regenerates every symlinked view. If a course’s `raw/<COURSE>/` directory is removed first, the next successful sync recreates it from scratch. `npm run rebuild-views` only regenerates views from the existing local raw corpus and does not contact Canvas.
 
 All Canvas operations in the implementation are reads. It intentionally excludes grades, submissions, quiz attempts, rosters, conversations, and every Canvas create/update/delete operation.

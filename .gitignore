@@ -1,5 +1,5 @@
 node_modules/
-archive/
+raw/
 .DS_Store
 *.partial-*
 known-content.json

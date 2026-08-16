@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, readdir, rename, stat, unlink } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, rm, stat, symlink, unlink } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -14,8 +15,14 @@ const execFileAsync = promisify(execFile);
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectDirectory = path.resolve(scriptDirectory, '..');
 
+function resolvePath(value, baseDirectory) {
+  const text = String(value ?? '');
+  const expanded = text === '~' ? homedir() : text.startsWith('~/') ? path.join(homedir(), text.slice(2)) : text;
+  return path.isAbsolute(expanded) ? path.normalize(expanded) : path.resolve(baseDirectory, expanded);
+}
+
 function resolveFromProject(value) {
-  return path.resolve(projectDirectory, value);
+  return resolvePath(value, projectDirectory);
 }
 
 async function loadConfig() {
@@ -24,8 +31,9 @@ async function loadConfig() {
   const knownContent = await readJson(resolveFromProject(config.knownContent || 'known-content.json'), {});
   return {
     ...config,
-    canvasBinary: resolveFromProject(config.canvasBinary),
-    archiveDirectory: resolveFromProject(config.archiveDirectory),
+    canvasBinary: resolvePath(config.canvasBinary, projectDirectory),
+    rawDirectory: resolvePath(config.rawDirectory || './raw', projectDirectory),
+    viewDirectory: resolvePath(config.viewDirectory || '~/NUS', projectDirectory),
     courses: config.courses.map((course) => ({ ...course, knownContent: knownContent[course.code] || {} })),
   };
 }
@@ -118,6 +126,29 @@ async function supplementFiles(config, warnings, resources, listedFiles, knownCo
   return [...filesById.values()].sort((left, right) => Number(left.id) - Number(right.id));
 }
 
+async function supplementFolders(config, warnings, listedFolders, files) {
+  const foldersById = new Map((listedFolders || [])
+    .filter((folder) => folder?.id != null)
+    .map((folder) => [Number(folder.id), folder]));
+  const pending = [...new Set([
+    ...(files || []).map((file) => Number(file.folder_id)),
+    ...(listedFolders || []).map((folder) => Number(folder.parent_folder_id)),
+  ]
+    .filter((folderId) => Number.isFinite(folderId) && folderId > 0 && !foldersById.has(folderId)))].sort((left, right) => left - right);
+
+  for (let index = 0; index < pending.length; index += 1) {
+    const folderId = pending[index];
+    if (foldersById.has(folderId)) continue;
+    const result = await collectResource(config, warnings, 'folder', ['folders', 'get', '--folder-id', String(folderId)], null);
+    const folder = Array.isArray(result) ? result[0] : result;
+    if (!folder?.id) continue;
+    foldersById.set(Number(folder.id), folder);
+    const parentId = Number(folder.parent_folder_id);
+    if (Number.isFinite(parentId) && parentId > 0 && !foldersById.has(parentId) && !pending.includes(parentId)) pending.push(parentId);
+  }
+  return [...foldersById.values()].sort((left, right) => Number(left.id) - Number(right.id));
+}
+
 async function collectCourse(config, configuredCourse) {
   const warnings = [];
   const courseId = configuredCourse.id;
@@ -137,16 +168,11 @@ async function collectCourse(config, configuredCourse) {
   const announcements = await collectResource(config, warnings, 'announcement', ['announcements', 'list', '--course-id', String(courseId)]);
   const quizzes = await collectResource(config, warnings, 'quiz-list', ['quizzes', 'list', '--course-id', String(courseId)]);
   const calendarEvents = await collectResource(config, warnings, 'calendar', ['calendar', 'list', '--course-id', String(courseId), '--all-events']);
-  const folders = await collectResource(config, warnings, 'file-list', ['folders', 'list', '--course-id', String(courseId)]);
+  const listedFolders = await collectResource(config, warnings, 'file-list', ['folders', 'list', '--course-id', String(courseId)]);
   const listedFiles = await collectResource(config, warnings, 'file-list', ['files', 'list', '--course-id', String(courseId)]);
   const files = await supplementFiles(config, warnings, { course, modules, pages, assignments, announcements, quizzes, calendarEvents }, listedFiles, configuredCourse.knownContent);
+  const folders = await supplementFolders(config, warnings, listedFolders, files);
   return sanitizeCanvasSecrets({ configuredCourse, course, modules, pages, assignments, assignmentGroups, assignmentOverrides, announcements, files, folders, quizzes, calendarEvents, warnings });
-}
-
-function folderPath(file, folders) {
-  const folder = folders.find((candidate) => candidate.id === file.folder_id);
-  const fullName = String(folder?.full_name || folder?.name || 'root').replace(/^course files\/?/i, '');
-  return fullName.split('/').filter(Boolean).map((part) => safeName(part)).join(path.sep) || 'root';
 }
 
 async function existingFileMatches(filePath, size) {
@@ -155,24 +181,6 @@ async function existingFileMatches(filePath, size) {
   } catch {
     return false;
   }
-}
-
-async function pathExists(filePath) {
-  try {
-    await stat(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function migratePath(courseDirectory, oldRelativePath, newRelativePath) {
-  if (!oldRelativePath || oldRelativePath === newRelativePath) return;
-  const oldPath = path.join(courseDirectory, oldRelativePath);
-  const newPath = path.join(courseDirectory, newRelativePath);
-  if (!(await pathExists(oldPath)) || await pathExists(newPath)) return;
-  await mkdir(path.dirname(newPath), { recursive: true });
-  await rename(oldPath, newPath);
 }
 
 async function unlinkArchivedPath(courseDirectory, relativePath) {
@@ -188,9 +196,9 @@ async function unlinkArchivedPath(courseDirectory, relativePath) {
 
 async function cleanupGeneratedDocuments(courseDirectory, documents, incompleteKinds) {
   const incomplete = new Set(incompleteKinds);
-  for (const kind of ['page', 'assignment', 'announcement', 'module']) {
+  for (const kind of ['page', 'assignment', 'announcement', 'module', 'quiz']) {
     if (incomplete.has(kind)) continue;
-    const directory = path.join(courseDirectory, 'documents', `${kind}s`);
+    const directory = path.join(courseDirectory, 'content', `${kind}s`);
     let names;
     try {
       names = await readdir(directory);
@@ -208,18 +216,226 @@ async function cleanupGeneratedDocuments(courseDirectory, documents, incompleteK
   }
 }
 
-function groupedCollisionNames(items, groupForItem, nameForItem, idForItem) {
-  const names = new Map();
-  const groups = new Map();
-  for (const item of items) {
-    const key = groupForItem(item);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(item);
+function moduleViewItem(item, documents, fileEntries) {
+  const byKindAndId = (kind, id) => documents.find((document) => document.kind === kind && document.document_id.endsWith(`:${kind}:${id}`));
+  if (item.type === 'Page') return documents.find((document) => document.kind === 'page' && document.metadata?.page_url === item.page_url);
+  if (item.type === 'Assignment') return byKindAndId('assignment', item.content_id);
+  if (item.type === 'Quiz') return byKindAndId('quiz', item.content_id);
+  if (item.type === 'File') return fileEntries.find((file) => String(file.canvas_id) === String(item.content_id));
+  return null;
+}
+
+function moduleViewStub(item, courseId) {
+  const url = item.html_url || item.external_url || item.url || `https://canvas.nus.edu.sg/courses/${courseId}/modules/items/${item.id}`;
+  return `# ${item.title}\n\nCanvas item type: ${item.type}\n\n[Open this item in Canvas](${url})\n`;
+}
+
+async function buildModuleView(viewCourseDirectory, rawCourseDirectory, data, documents, fileEntries) {
+  const viewDirectory = path.join(viewCourseDirectory, 'Modules');
+  const manifestPath = path.join(rawCourseDirectory, '.module-view.json');
+  const previous = await readJson(manifestPath, { paths: [] });
+  for (const relativePath of [...(previous.paths || [])].sort((left, right) => right.length - left.length)) {
+    await rm(path.join(viewDirectory, relativePath), { recursive: true, force: true });
   }
-  for (const groupItems of groups.values()) {
-    for (const [item, name] of collisionSafeNames(groupItems, nameForItem, idForItem)) names.set(item, name);
+  await mkdir(viewDirectory, { recursive: true });
+
+  const generatedPaths = [];
+  const moduleOrder = canvasModuleOrder(data.modules);
+  const moduleNames = collisionSafeNames(data.modules, (module) => safeName(module.name), (module) => module.id);
+  const addPath = (relativePath) => { generatedPaths.push(relativePath.split(path.sep).join('/')); return path.join(viewDirectory, relativePath); };
+
+  for (const module of data.modules) {
+    const moduleDirectoryName = `${orderPrefix(moduleOrder.moduleRanks.get(Number(module.id)))}${moduleNames.get(module)}`;
+    const moduleDirectory = addPath(moduleDirectoryName);
+    await mkdir(moduleDirectory, { recursive: true });
+    const items = module.items || [];
+    const stack = [];
+    const levelCounters = new Map();
+    for (const [index, item] of items.entries()) {
+      const indent = Number(item.indent || 0);
+      while (stack.length && stack.at(-1).indent >= indent) stack.pop();
+      const itemNumber = (levelCounters.get(indent) || 0) + 1;
+      levelCounters.set(indent, itemNumber);
+      for (const level of levelCounters.keys()) if (level > indent) levelCounters.delete(level);
+      const parent = stack.at(-1)?.directory || moduleDirectory;
+      const hasChildren = Number(items[index + 1]?.indent || 0) > indent;
+      const name = `${orderPrefix(itemNumber)}${safeName(item.title || `${item.type} ${item.id}`)}`;
+      const source = moduleViewItem(item, documents, fileEntries);
+      let itemPath;
+      if (hasChildren) {
+        const itemDirectory = addPath(path.relative(viewDirectory, path.join(parent, name)));
+        await mkdir(itemDirectory, { recursive: true });
+        itemPath = addPath(path.relative(viewDirectory, path.join(itemDirectory, name)) + (source?.local_path ? '' : '.md'));
+        if (source?.local_path) {
+          await symlink(path.relative(path.dirname(itemPath), path.join(rawCourseDirectory, source.local_path)), itemPath);
+        } else {
+          await atomicWrite(itemPath, moduleViewStub(item, data.course.id));
+        }
+        stack.push({ indent, directory: itemDirectory });
+      } else {
+        itemPath = addPath(path.relative(viewDirectory, path.join(parent, `${name}${source?.local_path ? '' : '.md'}`)));
+        if (source?.local_path) {
+          await symlink(path.relative(path.dirname(itemPath), path.join(rawCourseDirectory, source.local_path)), itemPath);
+        } else {
+          await atomicWrite(itemPath, moduleViewStub(item, data.course.id));
+        }
+      }
+    }
   }
-  return names;
+  await writeJson(manifestPath, { paths: generatedPaths });
+}
+
+function canvasFolderViewPath(file, folders) {
+  const byId = new Map(folders.map((folder) => [Number(folder.id), folder]));
+  const parts = [];
+  let current = byId.get(Number(file.folder_id));
+  while (current && !/^course files$/i.test(String(current.name || current.full_name || ''))) {
+    parts.unshift(current);
+    current = byId.get(Number(current.parent_folder_id));
+  }
+  const pathParts = [];
+  for (const folder of parts) {
+    const siblings = folders.filter((candidate) => Number(candidate.parent_folder_id) === Number(folder.parent_folder_id))
+      .sort((left, right) => safeName(left.name).localeCompare(safeName(right.name), 'en') || Number(left.id) - Number(right.id));
+    const folderIndex = siblings.findIndex((sibling) => Number(sibling.id) === Number(folder.id));
+    pathParts.push(`${orderPrefix(folderIndex + 1)}${safeName(folder.name)}`);
+  }
+  return pathParts;
+}
+
+function hasCompleteCanvasFolderPath(file, folders) {
+  const byId = new Map(folders.map((folder) => [Number(folder.id), folder]));
+  let current = byId.get(Number(file.folder_id));
+  while (current && !/^course files$/i.test(String(current.name || current.full_name || ''))) {
+    current = byId.get(Number(current.parent_folder_id));
+  }
+  return Boolean(current);
+}
+
+async function pruneEmptyGeneratedDirectories(directory, rootDirectory, preservedDirectories) {
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  for (const entry of entries.filter((item) => item.isDirectory())) {
+    await pruneEmptyGeneratedDirectories(path.join(directory, entry.name), rootDirectory, preservedDirectories);
+  }
+  entries = await readdir(directory, { withFileTypes: true });
+  const meaningfulEntries = entries.filter((entry) => entry.name !== '.DS_Store');
+  const relativeDirectory = path.relative(rootDirectory, directory).split(path.sep).join('/');
+  if (!meaningfulEntries.length && path.basename(directory).startsWith('(') && !preservedDirectories.has(relativeDirectory)) {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function buildCollectionViews(viewCourseDirectory, rawCourseDirectory, data, documents, fileEntries) {
+  const viewDirectory = viewCourseDirectory;
+  const manifestPath = path.join(rawCourseDirectory, '.collection-view.json');
+  const previous = await readJson(manifestPath, { paths: [] });
+  for (const relativePath of [...(previous.paths || [])].sort((left, right) => right.length - left.length)) {
+    await rm(path.join(viewDirectory, relativePath), { recursive: true, force: true });
+  }
+  await mkdir(viewDirectory, { recursive: true });
+  const generatedPaths = [];
+  const addPath = (absolutePath) => {
+    generatedPaths.push(path.relative(viewDirectory, absolutePath).split(path.sep).join('/'));
+    return absolutePath;
+  };
+  const link = async (absolutePath, sourcePath) => {
+    await mkdir(path.dirname(absolutePath), { recursive: true });
+    await symlink(path.relative(path.dirname(absolutePath), sourcePath), absolutePath);
+  };
+  const collection = async (directoryName, items, nameForItem, sourceForItem, sortItems = items) => {
+    const directory = path.join(viewDirectory, directoryName);
+    await mkdir(directory, { recursive: true });
+    const names = collisionSafeNames(items, nameForItem, (item) => item.id ?? item.canvas_id ?? item.document_id);
+    for (const item of sortItems) {
+      const source = sourceForItem(item);
+      if (!source) continue;
+      const target = addPath(path.join(directory, names.get(item)));
+      await link(target, path.join(rawCourseDirectory, source));
+    }
+  };
+
+  const assignments = data.assignments || [];
+  const assignmentOrder = (data.warnings || []).some((warning) => ['assignment-list', 'assignment-group-list'].includes(warning.kind))
+    ? new Map()
+    : canvasAssignmentOrder(assignments, data.assignmentGroups || []);
+  const assignmentDocuments = documents.filter((document) => document.kind === 'assignment');
+  await collection('Assignments', assignments,
+    (assignment) => `${orderPrefix(assignmentOrder.get(Number(assignment.id)))}${safeName(assignment.name)}.md`,
+    (assignment) => assignmentDocuments.find((document) => document.document_id.endsWith(`:assignment:${assignment.id}`))?.local_path,
+    [...assignments].sort((left, right) => (assignmentOrder.get(Number(left.id)) || 999999) - (assignmentOrder.get(Number(right.id)) || 999999)));
+
+  const announcements = [...(data.announcements || [])].sort((left, right) => new Date(left.posted_at || 0) - new Date(right.posted_at || 0));
+  const announcementDocuments = documents.filter((document) => document.kind === 'announcement');
+  await collection('Announcements', announcements,
+    (announcement) => `${orderPrefix(announcements.indexOf(announcement) + 1)}${safeName(announcement.title)}.md`,
+    (announcement) => announcementDocuments.find((document) => document.document_id.endsWith(`:announcement:${announcement.id}`))?.local_path,
+    announcements);
+
+  const quizzes = data.quizzes || [];
+  const quizDocuments = documents.filter((document) => document.kind === 'quiz');
+  await collection('Quizzes', quizzes,
+    (quiz) => `${orderPrefix(quizzes.indexOf(quiz) + 1)}${safeName(quiz.title)}.md`,
+    (quiz) => quizDocuments.find((document) => document.document_id.endsWith(`:quiz:${quiz.id}`))?.local_path,
+    [...quizzes].sort((left, right) => (left.position ?? 999999) - (right.position ?? 999999) || Number(left.id) - Number(right.id)));
+
+  const fileDirectory = path.join(viewDirectory, 'Files');
+  await mkdir(fileDirectory, { recursive: true });
+  const fileRecords = new Map((data.files || []).map((file) => [String(file.id), file]));
+  const preservedDirectories = new Set();
+  for (const folder of data.folders || []) {
+    if (/^course files$/i.test(String(folder.name || folder.full_name || ''))) continue;
+    if (!hasCompleteCanvasFolderPath({ folder_id: folder.id }, data.folders || [])) continue;
+    const folderParts = canvasFolderViewPath({ folder_id: folder.id }, data.folders || []);
+    if (!folderParts.length) continue;
+    const relativeDirectory = path.join(...folderParts).split(path.sep).join('/');
+    preservedDirectories.add(relativeDirectory);
+    await mkdir(path.join(fileDirectory, ...folderParts), { recursive: true });
+  }
+  const filesByFolder = new Map();
+  for (const file of fileEntries) {
+    const fileRecord = fileRecords.get(String(file.canvas_id));
+    if (fileRecord?.hidden || fileRecord?.hidden_for_user) continue;
+    if (fileRecord?.folder_id && !hasCompleteCanvasFolderPath(fileRecord, data.folders || [])) continue;
+    const folderId = String(fileRecord?.folder_id || 'root');
+    if (!filesByFolder.has(folderId)) filesByFolder.set(folderId, []);
+    filesByFolder.get(folderId).push(file);
+  }
+  for (const [folderId, folderFiles] of filesByFolder) {
+    const folderRecord = fileRecords.get(String(folderFiles[0].canvas_id));
+    const folderParts = canvasFolderViewPath(folderRecord || {}, data.folders || []);
+    const directory = folderId === 'root' ? fileDirectory : path.join(fileDirectory, ...folderParts);
+    const fileNames = collisionSafeNames(folderFiles, (file) => `${safeName(file.name)}`, (file) => file.canvas_id);
+    const orderedFiles = [...folderFiles].sort((left, right) => safeName(left.name).localeCompare(safeName(right.name), 'en') || Number(left.canvas_id) - Number(right.canvas_id));
+    const rootFolderId = (data.folders || []).find((folder) => /^course files$/i.test(String(folder.name || folder.full_name || '')))?.id;
+    const childFolderCount = (data.folders || [])
+      .filter((folder) => Number(folder.parent_folder_id) === Number(folderId === 'root' ? rootFolderId : folderId)).length;
+    for (const [fileIndex, file] of orderedFiles.entries()) {
+      const target = addPath(path.join(directory, `${orderPrefix(childFolderCount + fileIndex + 1)}${fileNames.get(file)}`));
+      await link(target, path.join(rawCourseDirectory, file.local_path));
+    }
+  }
+  await pruneEmptyGeneratedDirectories(fileDirectory, fileDirectory, preservedDirectories);
+
+  const modulePageUrls = new Set((data.modules || []).flatMap((module) => (module.items || [])
+    .filter((item) => item.type === 'Page' && item.page_url)
+    .map((item) => item.page_url)));
+  const extraPages = documents.filter((document) => document.kind === 'page'
+    && !modulePageUrls.has(document.metadata?.page_url) && document.content.trim());
+  const pageDirectory = viewDirectory;
+  await mkdir(pageDirectory, { recursive: true });
+  const pageNames = collisionSafeNames(extraPages, (page) => `${page.title}.md`, (page) => page.document_id);
+  for (const page of extraPages) {
+    const target = addPath(path.join(pageDirectory, pageNames.get(page)));
+    await link(target, path.join(rawCourseDirectory, page.local_path));
+  }
+  await writeJson(manifestPath, { paths: generatedPaths, pages_not_in_modules: extraPages.map((page) => ({ title: page.title, document_id: page.document_id, source_url: page.source_url })) });
+  return extraPages;
 }
 
 async function archiveFiles(config, data, courseDirectory, options) {
@@ -231,20 +447,11 @@ async function archiveFiles(config, data, courseDirectory, options) {
     files: fileListIncomplete ? { ...(previous.files || {}) } : {},
   };
   const entries = [];
-  const moduleOrder = canvasModuleOrder(data.modules);
-  const displayNames = groupedCollisionNames(
-    data.files,
-    (file) => folderPath(file, data.folders).toLocaleLowerCase('en'),
-    (file) => file.display_name || file.filename || `file-${file.id}`,
-    (file) => file.id,
-  );
   for (const file of [...data.files].sort((left, right) => left.id - right.id)) {
     const displayName = file.display_name || file.filename || `file-${file.id}`;
-    const orderedName = `${orderPrefix(moduleOrder.fileRanks.get(Number(file.id)))}${displayNames.get(file)}`;
-    const relativePath = path.join('files', folderPath(file, data.folders), orderedName);
+    const relativePath = path.join('content', 'files', String(file.id), safeName(displayName));
     const destination = path.join(courseDirectory, relativePath);
     const old = previous.files?.[file.id];
-    await migratePath(courseDirectory, old?.local_path, relativePath);
     const matches = await existingFileMatches(destination, file.size);
     let status = 'metadata-only';
     let contentSha256 = old?.content_sha256 ?? '';
@@ -272,8 +479,7 @@ async function archiveFiles(config, data, courseDirectory, options) {
     if (options.downloadFiles && matches && !contentSha256) contentSha256 = await sha256File(destination);
 
     let text = old?.text ?? { status: 'not-requested', bytes: 0 };
-    const textRelativePath = path.join('text', 'files', folderPath(file, data.folders), `${orderedName}.txt`);
-    await migratePath(courseDirectory, old?.text_path, textRelativePath);
+    const textRelativePath = path.join('content', 'text', 'files', String(file.id), `${safeName(displayName)}.txt`);
     if (options.extractText && (status === 'downloaded' || status === 'unchanged' || status === 'legacy-preserved')) {
       const textDestination = path.join(courseDirectory, textRelativePath);
       if (status === 'downloaded' || !(await existingFileMatches(textDestination, old?.text?.file_bytes))) {
@@ -286,7 +492,7 @@ async function archiveFiles(config, data, courseDirectory, options) {
     }
     if (options.extractText && legacyPreserved?.local_path) {
       const preservedSource = path.join(courseDirectory, legacyPreserved.local_path);
-      const preservedTextRelative = path.join('text', 'legacy-preserved', `${file.id}-${safeName(displayName)}.txt`);
+      const preservedTextRelative = path.join('content', 'text', 'legacy-preserved', `${file.id}-${safeName(displayName)}.txt`);
       const preservedTextDestination = path.join(courseDirectory, preservedTextRelative);
       const previousText = legacyPreserved.text ?? { status: 'not-requested', bytes: 0 };
       if (!(await existingFileMatches(preservedTextDestination, previousText.file_bytes))) {
@@ -353,21 +559,9 @@ function assignmentDates(assignment, overrides) {
   return dates;
 }
 
-async function buildDocuments(config, data, courseDirectory, fileEntries, previousState) {
+async function buildDocuments(config, data, courseDirectory, fileEntries) {
   const code = data.configuredCourse.code;
   const documents = [];
-  const moduleOrder = canvasModuleOrder(data.modules);
-  const assignmentOrder = data.warnings.some((warning) => ['assignment-list', 'assignment-group-list'].includes(warning.kind))
-    ? new Map()
-    : canvasAssignmentOrder(data.assignments, data.assignmentGroups);
-  const pageNames = collisionSafeNames(data.pages, (page) => `${safeName(page.title)}.md`, (page) => page.page_id || page.url);
-  const assignmentNames = collisionSafeNames(data.assignments, (assignment) => `${safeName(assignment.name)}.md`, (assignment) => assignment.id);
-  const announcementNames = collisionSafeNames(data.announcements, (announcement) => `${safeName(announcement.title)}.md`, (announcement) => announcement.id);
-  const moduleNames = collisionSafeNames(data.modules, (module) => `${safeName(module.name)}.md`, (module) => module.id);
-  const migrateDocument = async (kind, id, localPath) => {
-    const old = previousState?.[`${code}:${kind}:${id}`];
-    await migratePath(courseDirectory, old?.local_path, localPath);
-  };
   documents.push(documentRecord({
     id: data.course.id, kind: 'course', course: code, title: data.course.name,
     sourceUrl: `https://canvas.nus.edu.sg/courses/${data.course.id}`,
@@ -376,8 +570,7 @@ async function buildDocuments(config, data, courseDirectory, fileEntries, previo
   }));
   for (const page of data.pages) {
     const content = htmlToMarkdown(page.body || '');
-    const localPath = path.posix.join('documents/pages', `${orderPrefix(moduleOrder.pageRanks.get(String(page.url)))}${pageNames.get(page)}`);
-    await migrateDocument('page', page.page_id || page.url, localPath);
+    const localPath = path.posix.join('content/pages', `${page.page_id || safeName(page.url)}.md`);
     await atomicWrite(path.join(courseDirectory, localPath), `# ${page.title}\n\n${content}`);
     documents.push(documentRecord({
       id: page.page_id || page.url, kind: 'page', course: code, title: page.title,
@@ -389,8 +582,7 @@ async function buildDocuments(config, data, courseDirectory, fileEntries, previo
   for (const assignment of data.assignments) {
     const content = htmlToMarkdown(assignment.description || '');
     const dates = assignmentDates(assignment, data.assignmentOverrides[assignment.id]);
-    const localPath = path.posix.join('documents/assignments', `${orderPrefix(assignmentOrder.get(Number(assignment.id)))}${assignmentNames.get(assignment)}`);
-    await migrateDocument('assignment', assignment.id, localPath);
+    const localPath = path.posix.join('content/assignments', `${assignment.id}.md`);
     const dateLines = dates.map((date) => `- ${date.audience}: ${date.due_at || 'no due date'}`).join('\n');
     await atomicWrite(path.join(courseDirectory, localPath), `# ${assignment.name}\n\n## Dates\n\n${dateLines || '- No dated variants'}\n\n${content}`);
     documents.push(documentRecord({
@@ -403,10 +595,9 @@ async function buildDocuments(config, data, courseDirectory, fileEntries, previo
     }));
   }
   const sortedAnnouncements = [...data.announcements].sort((left, right) => new Date(left.posted_at || 0) - new Date(right.posted_at || 0));
-  for (const [announcementIndex, announcement] of sortedAnnouncements.entries()) {
+  for (const announcement of sortedAnnouncements) {
     const content = htmlToMarkdown(announcement.message || '');
-    const localPath = path.posix.join('documents/announcements', `${orderPrefix(announcementIndex + 1)}${announcementNames.get(announcement)}`);
-    await migrateDocument('announcement', announcement.id, localPath);
+    const localPath = path.posix.join('content/announcements', `${announcement.id}.md`);
     await atomicWrite(path.join(courseDirectory, localPath), `# ${announcement.title}\n\n${content}`);
     documents.push(documentRecord({
       id: announcement.id, kind: 'announcement', course: code, title: announcement.title,
@@ -416,8 +607,7 @@ async function buildDocuments(config, data, courseDirectory, fileEntries, previo
   }
   for (const module of data.modules) {
     const lines = (module.items || []).map((item) => `${'  '.repeat(item.indent || 0)}- ${item.type}: ${item.title} ${item.html_url || item.external_url || ''}`);
-    const localPath = path.posix.join('documents/modules', `${orderPrefix(moduleOrder.moduleRanks.get(Number(module.id)))}${moduleNames.get(module)}`);
-    await migrateDocument('module', module.id, localPath);
+    const localPath = path.posix.join('content/modules', `${module.id}.md`);
     await atomicWrite(path.join(courseDirectory, localPath), `# ${module.name}\n\n${lines.join('\n')}\n`);
     documents.push(documentRecord({
       id: module.id, kind: 'module', course: code, title: module.name,
@@ -427,11 +617,19 @@ async function buildDocuments(config, data, courseDirectory, fileEntries, previo
     }));
   }
   for (const quiz of data.quizzes) {
+    const localPath = path.posix.join('content/quizzes', `${quiz.id}.md`);
+    const content = htmlToMarkdown(quiz.description || '');
+    const dateLines = [
+      quiz.due_at ? `- Due: ${quiz.due_at}` : '',
+      quiz.unlock_at ? `- Opens: ${quiz.unlock_at}` : '',
+      quiz.lock_at ? `- Closes: ${quiz.lock_at}` : '',
+    ].filter(Boolean).join('\n');
+    await atomicWrite(path.join(courseDirectory, localPath), `# ${quiz.title}\n\n## Details\n\n${dateLines || '- No dated variants'}\n\n${content}`);
     documents.push(documentRecord({
       id: quiz.id, kind: 'quiz', course: code, title: quiz.title,
-      sourceUrl: quiz.html_url, updatedAt: quiz.updated_at,
+      sourceUrl: quiz.html_url, updatedAt: quiz.updated_at, localPath,
       metadata: { due_at: quiz.due_at, unlock_at: quiz.unlock_at, lock_at: quiz.lock_at, points_possible: quiz.points_possible, published: quiz.published },
-      content: htmlToMarkdown(quiz.description || ''),
+      content,
     }));
   }
   for (const event of data.calendarEvents) {
@@ -465,10 +663,12 @@ function courseIndex(config, data, documents, files, collectedAt) {
   const lines = [
     `# ${code} — ${data.course.name}`, '',
     `Collected: ${formatDate(collectedAt, config.timezone)}`, '',
+    `- [Canvas-shaped viewing tree](${path.relative(path.join(config.rawDirectory, code), path.join(config.viewDirectory, code)).split(path.sep).join('/') || '.'}/)`,
+    '- Machine-oriented content: `content/`',
     '## Corpus', '',
     `- ${documents.length} normalized documents in [documents.jsonl](documents.jsonl)`,
     `- ${files.length} Canvas file records in [file-manifest.json](file-manifest.json)`,
-    '- Lossless API responses in `raw/`', '',
+    '- Lossless API responses in this course directory', '',
     '## Assignment dates', '',
     '| Due | Assignment | Audience |', '|---:|---|---|',
   ];
@@ -492,8 +692,9 @@ function courseIndex(config, data, documents, files, collectedAt) {
 
 async function archiveCourse(config, data, options, collectedAt) {
   const code = data.configuredCourse.code;
-  const courseDirectory = path.join(config.archiveDirectory, code);
-  const rawDirectory = path.join(courseDirectory, 'raw');
+  const courseDirectory = path.join(config.rawDirectory, code);
+  const viewCourseDirectory = path.join(config.viewDirectory, code);
+  const rawDirectory = courseDirectory;
   await mkdir(rawDirectory, { recursive: true });
   for (const key of ['course', 'modules', 'pages', 'assignments', 'assignmentGroups', 'assignmentOverrides', 'announcements', 'files', 'folders', 'quizzes', 'calendarEvents', 'warnings']) {
     await writeJson(path.join(rawDirectory, `${key}.json`), data[key]);
@@ -502,7 +703,9 @@ async function archiveCourse(config, data, options, collectedAt) {
   await writeJson(path.join(rawDirectory, 'warnings.json'), data.warnings);
   const statePath = path.join(courseDirectory, 'state.json');
   const previousState = await readJson(statePath, {});
-  const documents = await buildDocuments(config, data, courseDirectory, fileEntries, previousState);
+  const documents = await buildDocuments(config, data, courseDirectory, fileEntries);
+  await buildModuleView(viewCourseDirectory, courseDirectory, data, documents, fileEntries);
+  await buildCollectionViews(viewCourseDirectory, courseDirectory, data, documents, fileEntries);
   const jsonl = documents.map((document) => stableJson(document, 0)).join('\n');
   await atomicWrite(path.join(courseDirectory, 'documents.jsonl'), `${jsonl}${jsonl ? '\n' : ''}`);
 
@@ -575,7 +778,7 @@ async function writeRunOutputs(config, results, startedAt) {
       lines.push('');
     }
   }
-  const logsDirectory = path.join(config.archiveDirectory, 'logs');
+  const logsDirectory = path.join(config.rawDirectory, 'logs');
   const olderDirectory = path.join(logsDirectory, 'older');
   await moveOlderLogs(logsDirectory, olderDirectory);
   await writeJson(path.join(olderDirectory, `${runId}.json`), run);
@@ -601,7 +804,7 @@ async function writeRunOutputs(config, results, startedAt) {
       rootLines.push('');
     }
   }
-  await atomicWrite(path.join(config.archiveDirectory, 'INDEX.md'), `${rootLines.join('\n')}\n`);
+  await atomicWrite(path.join(config.rawDirectory, 'INDEX.md'), `${rootLines.join('\n')}\n`);
   return run;
 }
 
@@ -610,7 +813,8 @@ async function doctor(config) {
   const { stdout: auth } = await execFileAsync(config.canvasBinary, ['auth', 'status']);
   console.log(version.trim());
   console.log(auth.trim());
-  console.log(`Archive: ${config.archiveDirectory}`);
+  console.log(`Raw directory: ${config.rawDirectory}`);
+  console.log(`View directory: ${config.viewDirectory}`);
 }
 
 function parseOptions(config, argv) {
@@ -629,7 +833,7 @@ async function sync(config, argv) {
   const options = parseOptions(config, argv);
   const startedAt = new Date().toISOString();
   const results = [];
-  await mkdir(config.archiveDirectory, { recursive: true });
+  await mkdir(config.rawDirectory, { recursive: true });
   for (const course of options.courses) {
     console.log(`[${course.code}] collecting Canvas metadata`);
     const data = await collectCourse(config, course);
@@ -637,6 +841,8 @@ async function sync(config, argv) {
     results.push(await archiveCourse(config, data, options, startedAt));
   }
   const run = await writeRunOutputs(config, results, startedAt);
+  await rebuildViewsFromArchive(config, options.courses.length === config.courses.length
+    ? [] : ['--course', options.courses[0].code]);
   const total = run.courses.reduce((summary, course) => ({
     added: summary.added + course.summary.added,
     modified: summary.modified + course.summary.modified,
@@ -649,11 +855,56 @@ async function sync(config, argv) {
       console.warn(`[${course.code}] ${warning.kind}: ${message}`);
     }
   }
-  console.log(`Index: ${path.join(config.archiveDirectory, 'INDEX.md')}`);
+  console.log(`Index: ${path.join(config.rawDirectory, 'INDEX.md')}`);
+}
+
+async function rebuildViewsFromArchive(config, argv) {
+  const courseFlag = argv.indexOf('--course');
+  const requestedCourse = courseFlag >= 0 ? argv[courseFlag + 1]?.toUpperCase() : null;
+  const courses = requestedCourse ? config.courses.filter((course) => course.code === requestedCourse) : config.courses;
+  if (!courses.length) throw new Error(`Unknown course: ${requestedCourse}`);
+  for (const configuredCourse of courses) {
+    const courseDirectory = path.join(config.rawDirectory, configuredCourse.code);
+    const viewCourseDirectory = path.join(config.viewDirectory, configuredCourse.code);
+    const rawDirectory = courseDirectory;
+    const readRaw = async (name, fallback = []) => readJson(path.join(rawDirectory, `${name}.json`), fallback);
+    const data = {
+      configuredCourse,
+      course: await readRaw('course', {}),
+      modules: await readRaw('modules'),
+      assignments: await readRaw('assignments'),
+      assignmentGroups: await readRaw('assignmentGroups'),
+      announcements: await readRaw('announcements'),
+      files: await readRaw('files'),
+      folders: await readRaw('folders'),
+      quizzes: await readRaw('quizzes'),
+      warnings: await readRaw('warnings'),
+    };
+    const documentsPath = path.join(courseDirectory, 'documents.jsonl');
+    const existingDocuments = (await readFile(documentsPath, 'utf8')).split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    const documents = [...existingDocuments];
+    for (const quiz of data.quizzes) {
+      const index = documents.findIndex((document) => document.document_id === `${configuredCourse.code}:quiz:${quiz.id}`);
+      if (index < 0) continue;
+      const localPath = path.posix.join('content/quizzes', `${quiz.id}.md`);
+      const content = htmlToMarkdown(quiz.description || '');
+      const dateLines = [quiz.due_at ? `- Due: ${quiz.due_at}` : '', quiz.unlock_at ? `- Opens: ${quiz.unlock_at}` : '', quiz.lock_at ? `- Closes: ${quiz.lock_at}` : ''].filter(Boolean).join('\n');
+      await atomicWrite(path.join(courseDirectory, localPath), `# ${quiz.title}\n\n## Details\n\n${dateLines || '- No dated variants'}\n\n${content}`);
+      documents[index] = { ...documents[index], local_path: localPath, content_sha256: documentRecord({ id: quiz.id, kind: 'quiz', course: configuredCourse.code, title: quiz.title, content }).content_sha256, content };
+    }
+    const fileManifest = await readJson(path.join(courseDirectory, 'file-manifest.json'), { files: {} });
+    const fileEntries = Object.values(fileManifest.files || {});
+    await rm(viewCourseDirectory, { recursive: true, force: true });
+    await buildModuleView(viewCourseDirectory, courseDirectory, data, documents, fileEntries);
+    const extraPages = await buildCollectionViews(viewCourseDirectory, courseDirectory, data, documents, fileEntries);
+    await atomicWrite(documentsPath, `${documents.map((document) => stableJson(document, 0)).join('\n')}\n`);
+    console.log(`[${configuredCourse.code}] rebuilt views; ${extraPages.length} content-bearing pages are not in modules`);
+  }
 }
 
 const config = await loadConfig();
 const command = process.argv[2] || 'sync';
 if (command === 'doctor') await doctor(config);
 else if (command === 'sync') await sync(config, process.argv.slice(3));
+else if (command === 'rebuild-views') await rebuildViewsFromArchive(config, process.argv.slice(3));
 else throw new Error(`Unknown command: ${command}`);

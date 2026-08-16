@@ -7,7 +7,7 @@ This repository has two distinct operating modes. Determine which mode the task 
 - Never stage, unstage, commit, amend, reset, or otherwise manage Git state. Git staging and commits belong to the user.
 - Never expose, copy, log, or persist Canvas credentials. Authentication is held outside this repository in the macOS Keychain.
 - Never create, update, submit, grade, publish, or delete anything in Canvas. This project is read-only with respect to Canvas.
-- Treat `archive/` as generated course data and `src/`, `test/`, `config.json`, and `known-content.json` as the archiver implementation.
+- Treat `raw/` as generated machine course data, the configured `viewDirectory` as the user-facing symlink view, and `src/`, `test/`, `config.json`, and `known-content.json` as the archiver implementation.
 - Preserve stable identifiers, source URLs, timestamps, hashes, and warning details. They are required for reliable diffs and indexing.
 - Preserve and display external links found in Canvas content. If externally hosted content cannot be downloaded, the visible link is still part of the archive and indexing result.
 - Read warning messages themselves; do not reduce them to warning counts.
@@ -32,13 +32,13 @@ Use this mode when changing the archiver, configuration, tests, documentation, e
 - Keep all Canvas operations read-only and use the pinned binary at `tools/canvas-cli/current/canvas`.
 - Prefer structured JSON from Canvas and deterministic, atomic outputs.
 - Optimize generated content for semantic diffing and AI indexing: stable ordering, stable IDs, normalized text, explicit metadata, and content hashes.
-- Do not hand-edit generated files under `archive/`. Change the generator and run a sync instead.
+- Do not hand-edit generated files under `raw/` or the configured view directory. Change the generator and run a sync instead.
 - Do not report removals for resource kinds whose collection was incomplete or warned.
 - Keep full warning messages in human-readable reports, including the affected file ID and filename where available.
 - Preserve valid existing downloads when Canvas temporarily stops providing a download URL. Never substitute an HTML error response for a PDF, Office document, or other attachment.
 - A missing pages, quizzes, or similar collection may be normal for a course that does not use that Canvas feature. Preserve the warning, but do not describe it as missing course content without corroborating evidence from modules or known identifiers.
 - A file record with no download URL is commonly gated or unreleased by teaching staff. Preserve its metadata, warn that its content is not currently downloadable, and retry it on later syncs.
-- Avoid deleting archive content unless the user explicitly authorizes it and the exact targets have been verified.
+- Avoid deleting raw content unless the user explicitly authorizes it and the exact targets have been verified.
 - Do not add grades, submissions, quiz attempts, rosters, conversations, or other sensitive student data without explicit user direction.
 
 ### Verification
@@ -52,11 +52,11 @@ npm run doctor
 
 Run `npm run sync` only when a live, read-only refresh is needed. A successful sync should produce:
 
-- `archive/INDEX.md`
-- one `archive/<COURSE>/INDEX.md` per collected course
+- `raw/INDEX.md`
+- one `raw/<COURSE>/INDEX.md` per collected course
 - normalized `documents.jsonl` records
 - file manifests and extracted-text sidecars
-- `archive/logs/latest.md` and `archive/logs/latest.json`
+- `raw/logs/latest.md` and `raw/logs/latest.json`
 
 Review the actual warnings and the added/modified/removed diff before declaring success.
 
@@ -77,16 +77,16 @@ Use this mode whenever the user asks for a Canvas to Notion update. Its purpose 
 - Create or update an **NUS Exams** event only when the user has authorized calendar writes and the date and time are confirmed by reliable course material. Never create an event from a TBA, ambiguous, internally inconsistent, or stale source.
 - Do not use Google Calendar for assignments, quizzes, tutorials, diagnostics, study windows, or tasks that run over a period of time. Those belong in Notion.
 - Never delete or cancel a calendar event without the user's explicit approval.
-- Do not alter `archive/`, implementation files, configuration, or logs, and do not run a live Canvas sync unless the user specifically asks for one.
+- Do not alter `raw/`, the configured view directory, implementation files, configuration, or logs, and do not run a live Canvas sync unless the user specifically asks for one.
 
 ### Sources and verification order
 
 1. Inspect **NUS Journey > Task Tracker** in Notion, including every current task's subject, title, date, and page body.
 2. Inspect the **NUS Exams** Google Calendar for existing one-time examination events when calendar access is available.
-3. Read `archive/logs/latest.json` for the Canvas run timestamp, course scope, collection completeness, and full warnings.
-4. Read `archive/INDEX.md` for the corpus overview and assignment dates.
-5. Read each in-scope `archive/<COURSE>/documents.jsonl` as the canonical normalized Canvas record stream.
-6. Use `archive/<COURSE>/documents/`, `archive/<COURSE>/text/files/`, and `file-manifest.json` when task instructions or attachment text are needed.
+3. Read `raw/logs/latest.json` for the Canvas run timestamp, course scope, collection completeness, and full warnings.
+4. Read `raw/INDEX.md` for the corpus overview and assignment dates.
+5. Read each in-scope `raw/<COURSE>/documents.jsonl` as the canonical normalized Canvas record stream.
+6. Use `raw/<COURSE>/content/`, `raw/<COURSE>/content/text/files/`, and `file-manifest.json` when task instructions or attachment text are needed.
 7. Use raw records only to resolve an ambiguity; do not use `raw/` as the default source.
 
 If the user explicitly requests a fresh Canvas update, perform the authorized read-only refresh first, review its warnings, and then use the completed archive as the comparison source.

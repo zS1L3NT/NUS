@@ -1,7 +1,8 @@
 {
   "canvasBinary": "tools/canvas-cli/current/canvas",
   "canvasInstance": "nus",
-  "archiveDirectory": "archive",
+  "rawDirectory": "./raw",
+  "viewDirectory": "~/NUS",
   "knownContent": "known-content.json",
   "timezone": "Asia/Singapore",
   "downloadFiles": true,
