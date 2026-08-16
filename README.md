@@ -12,6 +12,7 @@ Raw machine data stays in the repository under `./raw`; the Finder-facing view i
 - `raw/<COURSE>/documents.jsonl` contains stable, normalized records for AI indexing;
 - `raw/<COURSE>/file-manifest.json` records original attachment metadata, hashes, and extraction status;
 - `raw/logs/latest.md` and `raw/logs/latest.json` report additions, modifications, and removals; timestamped older reports are kept under `raw/logs/older/`.
+- `~/NUS/logs/latest.md` is the Finder-facing change report; dated Markdown reports under `~/NUS/logs/older/` contain the readable history.
 
 ## Finder-friendly names and ordering
 

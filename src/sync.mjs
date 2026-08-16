@@ -370,19 +370,21 @@ async function buildCollectionViews(viewCourseDirectory, rawCourseDirectory, dat
     (assignment) => assignmentDocuments.find((document) => document.document_id.endsWith(`:assignment:${assignment.id}`))?.local_path,
     [...assignments].sort((left, right) => (assignmentOrder.get(Number(left.id)) || 999999) - (assignmentOrder.get(Number(right.id)) || 999999)));
 
-  const announcements = [...(data.announcements || [])].sort((left, right) => new Date(left.posted_at || 0) - new Date(right.posted_at || 0));
+  const announcements = [...(data.announcements || [])].sort((left, right) => new Date(left.posted_at || 0) - new Date(right.posted_at || 0)
+    || Number(left.id) - Number(right.id));
   const announcementDocuments = documents.filter((document) => document.kind === 'announcement');
   await collection('Announcements', announcements,
     (announcement) => `${orderPrefix(announcements.indexOf(announcement) + 1)}${safeName(announcement.title)}.md`,
     (announcement) => announcementDocuments.find((document) => document.document_id.endsWith(`:announcement:${announcement.id}`))?.local_path,
     announcements);
 
-  const quizzes = data.quizzes || [];
+  const quizzes = [...(data.quizzes || [])].sort((left, right) => Number(left.position ?? 999999) - Number(right.position ?? 999999)
+    || Number(left.id) - Number(right.id));
   const quizDocuments = documents.filter((document) => document.kind === 'quiz');
   await collection('Quizzes', quizzes,
     (quiz) => `${orderPrefix(quizzes.indexOf(quiz) + 1)}${safeName(quiz.title)}.md`,
     (quiz) => quizDocuments.find((document) => document.document_id.endsWith(`:quiz:${quiz.id}`))?.local_path,
-    [...quizzes].sort((left, right) => (left.position ?? 999999) - (right.position ?? 999999) || Number(left.id) - Number(right.id)));
+    quizzes);
 
   const fileDirectory = path.join(viewDirectory, 'Files');
   await mkdir(fileDirectory, { recursive: true });
@@ -425,6 +427,12 @@ async function buildCollectionViews(viewCourseDirectory, rawCourseDirectory, dat
   const modulePageUrls = new Set((data.modules || []).flatMap((module) => (module.items || [])
     .filter((item) => item.type === 'Page' && item.page_url)
     .map((item) => item.page_url)));
+  const pages = [...(data.pages || [])];
+  const pageDocuments = documents.filter((document) => document.kind === 'page');
+  await collection('Pages', pages,
+    (page) => `${orderPrefix(pages.indexOf(page) + 1)}${safeName(page.title)}.md`,
+    (page) => pageDocuments.find((document) => document.metadata?.page_url === page.url)?.local_path,
+    pages);
   const extraPages = documents.filter((document) => document.kind === 'page'
     && !modulePageUrls.has(document.metadata?.page_url) && document.content.trim());
   const pageDirectory = viewDirectory;
@@ -745,6 +753,46 @@ function appendWarning(lines, warning) {
   for (const line of messageLines) lines.push(`  ${line}`);
 }
 
+function appendViewChanges(lines, changes, headingLevel) {
+  const heading = '#'.repeat(headingLevel);
+  for (const action of ['added', 'modified', 'removed']) {
+    const matching = changes.filter((change) => change.action === action);
+    const title = action[0].toUpperCase() + action.slice(1);
+    lines.push(`${heading} ${title} (${matching.length})`, '');
+    if (!matching.length) lines.push('None.', '');
+    else for (const change of matching) lines.push(`- ${change.kind}: ${change.title}`);
+    lines.push('');
+  }
+}
+
+function viewRunName(startedAt) {
+  return startedAt.slice(0, 19).replace('T', '_').replaceAll(':', '-');
+}
+
+async function writeViewLogs(config, run) {
+  const logsDirectory = path.join(config.viewDirectory, 'logs');
+  const olderDirectory = path.join(logsDirectory, 'older');
+  await mkdir(olderDirectory, { recursive: true });
+  const lines = [
+    '# Canvas sync changes', '',
+    `Run started: ${formatDate(run.started_at, config.timezone)}`, '',
+    `Run completed: ${formatDate(run.completed_at, config.timezone)}`, '',
+    '| Course | Added | Modified | Removed | Warnings |', '|---|---:|---:|---:|---:|',
+  ];
+  for (const course of run.courses) lines.push(`| ${course.code} | ${course.summary.added} | ${course.summary.modified} | ${course.summary.removed} | ${course.warnings?.length || 0} |`);
+  for (const course of run.courses) {
+    lines.push('', `## ${course.code}`, '');
+    appendViewChanges(lines, course.changes, 3);
+    if (course.warnings?.length) {
+      lines.push('', `### Warnings (${course.warnings.length})`, '');
+      for (const warning of course.warnings) appendWarning(lines, warning);
+    }
+  }
+  const report = `${lines.join('\n')}\n`;
+  await atomicWrite(path.join(olderDirectory, `${viewRunName(run.started_at)}.md`), report);
+  await atomicWrite(path.join(logsDirectory, 'latest.md'), report);
+}
+
 async function moveOlderLogs(logsDirectory, olderDirectory) {
   await mkdir(olderDirectory, { recursive: true });
   const historicalLogPattern = /^\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d(?:-\d+)?Z\.(?:json|md)$/;
@@ -785,6 +833,7 @@ async function writeRunOutputs(config, results, startedAt) {
   await writeJson(path.join(logsDirectory, 'latest.json'), run);
   await atomicWrite(path.join(olderDirectory, `${runId}.md`), `${lines.join('\n')}\n`);
   await atomicWrite(path.join(logsDirectory, 'latest.md'), `${lines.join('\n')}\n`);
+  await writeViewLogs(config, run);
 
   const rootLines = ['# NUS Canvas corpus (canvas-cli)', '', `Last updated: ${formatDate(completedAt, config.timezone)}`, '', '## Courses', ''];
   for (const result of results) rootLines.push(`- [${result.code} — ${result.data.course.name}](${result.code}/INDEX.md) — ${result.documents.length} documents, ${result.fileEntries.length} files`);
@@ -872,6 +921,7 @@ async function rebuildViewsFromArchive(config, argv) {
       configuredCourse,
       course: await readRaw('course', {}),
       modules: await readRaw('modules'),
+      pages: await readRaw('pages'),
       assignments: await readRaw('assignments'),
       assignmentGroups: await readRaw('assignmentGroups'),
       announcements: await readRaw('announcements'),
@@ -900,6 +950,9 @@ async function rebuildViewsFromArchive(config, argv) {
     await atomicWrite(documentsPath, `${documents.map((document) => stableJson(document, 0)).join('\n')}\n`);
     console.log(`[${configuredCourse.code}] rebuilt views; ${extraPages.length} content-bearing pages are not in modules`);
   }
+  const latestRun = await readJson(path.join(config.rawDirectory, 'logs', 'latest.json'), null);
+  if (latestRun) await writeViewLogs(config, latestRun);
+  else await mkdir(path.join(config.viewDirectory, 'logs'), { recursive: true });
 }
 
 const config = await loadConfig();
