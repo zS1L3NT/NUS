@@ -6,7 +6,7 @@ This is the active, deterministic Canvas archiver. It uses the pinned `canvas-cl
 
 Raw machine data stays in the repository under `./raw`; the Finder-facing view is written outside the repository under `~/NUS Canvas` by default. Change `rawDirectory` and `viewDirectory` in `config.json` to customize them:
 
-- `~/NUS Canvas/<COURSE>/` is the Finder-facing Canvas-shaped view, with symlinked Modules, Quizzes, Assignments, Announcements, Files, and unlinked pages at its root;
+- `~/NUS Canvas/<COURSE>/` is the Finder-facing Canvas-shaped view, with copied Modules, Quizzes, Assignments, Announcements, Files, and unlinked pages at its root;
 - `raw/<COURSE>/` is machine-only: lossless Canvas responses, normalized records, manifests, state, and downloaded content;
 - `raw/<COURSE>/content/text/` contains deterministic text sidecars for supported text, HTML, PDF, Word, PowerPoint, Excel, ZIP, and OCR-readable image files;
 - `raw/<COURSE>/documents.jsonl` contains stable, normalized records for AI indexing;
@@ -19,7 +19,7 @@ Raw machine data stays in the repository under `./raw`; the Finder-facing view i
 - The configured view tree uses Canvas module order and indentation, so it is the browsing side of the corpus.
 - Every Canvas folder and item view is numbered from `(001)` at its own level; child folders restart numbering at `(001)`.
 - The `raw/<COURSE>/content/` tree uses stable Canvas IDs and machine-oriented names; it is the backing side and is not intended for normal reading.
-- Pages, assignments, and files in the view tree point back to `raw/<COURSE>/content/` with relative symlinks, so each item has one source copy.
+- Pages, assignments, and files in the view tree are copied from `raw/<COURSE>/content/` for easy independent Finder use.
 - Online-only module items are represented by small Markdown link stubs.
 - After a complete Canvas listing, files and generated documents that Canvas has removed are deleted locally. Cleanup is skipped for a resource type whenever its Canvas listing is incomplete or fails.
 
@@ -36,6 +36,6 @@ npm run rebuild-views
 npm test
 ```
 
-`npm run sync` is the full rebuild path: it reads Canvas, downloads missing raw attachments, writes normalized content, and regenerates every symlinked view. If a course’s `raw/<COURSE>/` directory is removed first, the next successful sync recreates it from scratch. `npm run rebuild-views` only regenerates views from the existing local raw corpus and does not contact Canvas.
+`npm run sync` is the full rebuild path: it reads Canvas, downloads missing raw attachments, writes normalized content, and regenerates every copied view. If a course’s `raw/<COURSE>/` directory is removed first, the next successful sync recreates it from scratch. `npm run rebuild-views` only regenerates views from the existing local raw corpus and does not contact Canvas.
 
 All Canvas operations in the implementation are reads. It intentionally excludes grades, submissions, quiz attempts, rosters, conversations, and every Canvas create/update/delete operation.

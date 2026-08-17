@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { mkdir, readFile, readdir, rename, rm, stat, symlink, unlink } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -230,6 +230,20 @@ function moduleViewStub(item, courseId) {
   return `# ${item.title}\n\nCanvas item type: ${item.type}\n\n[Open this item in Canvas](${url})\n`;
 }
 
+function moduleViewFilename(name, source) {
+  const markdown = !source?.local_path || /\.md$/i.test(source.local_path);
+  return `${name}${markdown ? '.md' : ''}`;
+}
+
+async function copyViewFile(destination, source) {
+  await mkdir(path.dirname(destination), { recursive: true });
+  try {
+    await copyFile(source, destination);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+}
+
 async function buildModuleView(viewCourseDirectory, rawCourseDirectory, data, documents, fileEntries) {
   const viewDirectory = path.join(viewCourseDirectory, 'Modules');
   const manifestPath = path.join(rawCourseDirectory, '.module-view.json');
@@ -265,17 +279,17 @@ async function buildModuleView(viewCourseDirectory, rawCourseDirectory, data, do
       if (hasChildren) {
         const itemDirectory = addPath(path.relative(viewDirectory, path.join(parent, name)));
         await mkdir(itemDirectory, { recursive: true });
-        itemPath = addPath(path.relative(viewDirectory, path.join(itemDirectory, name)) + (source?.local_path ? '' : '.md'));
+        itemPath = addPath(path.relative(viewDirectory, path.join(itemDirectory, moduleViewFilename(name, source))));
         if (source?.local_path) {
-          await symlink(path.relative(path.dirname(itemPath), path.join(rawCourseDirectory, source.local_path)), itemPath);
+          await copyViewFile(itemPath, path.join(rawCourseDirectory, source.local_path));
         } else {
           await atomicWrite(itemPath, moduleViewStub(item, data.course.id));
         }
         stack.push({ indent, directory: itemDirectory });
       } else {
-        itemPath = addPath(path.relative(viewDirectory, path.join(parent, `${name}${source?.local_path ? '' : '.md'}`)));
+        itemPath = addPath(path.relative(viewDirectory, path.join(parent, moduleViewFilename(name, source))));
         if (source?.local_path) {
-          await symlink(path.relative(path.dirname(itemPath), path.join(rawCourseDirectory, source.local_path)), itemPath);
+          await copyViewFile(itemPath, path.join(rawCourseDirectory, source.local_path));
         } else {
           await atomicWrite(itemPath, moduleViewStub(item, data.course.id));
         }
@@ -344,10 +358,7 @@ async function buildCollectionViews(viewCourseDirectory, rawCourseDirectory, dat
     generatedPaths.push(path.relative(viewDirectory, absolutePath).split(path.sep).join('/'));
     return absolutePath;
   };
-  const link = async (absolutePath, sourcePath) => {
-    await mkdir(path.dirname(absolutePath), { recursive: true });
-    await symlink(path.relative(path.dirname(absolutePath), sourcePath), absolutePath);
-  };
+  const link = copyViewFile;
   const collection = async (directoryName, items, nameForItem, sourceForItem, sortItems = items) => {
     const directory = path.join(viewDirectory, directoryName);
     await mkdir(directory, { recursive: true });

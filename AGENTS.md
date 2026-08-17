@@ -7,7 +7,7 @@ This repository has two distinct operating modes. Determine which mode the task 
 - Never stage, unstage, commit, amend, reset, or otherwise manage Git state. Git staging and commits belong to the user.
 - Never expose, copy, log, or persist Canvas credentials. Authentication is held outside this repository in the macOS Keychain.
 - Never create, update, submit, grade, publish, or delete anything in Canvas. This project is read-only with respect to Canvas.
-- Treat `raw/` as generated machine course data, the configured `viewDirectory` as the user-facing symlink view, and `src/`, `test/`, `config.json`, and `known-content.json` as the archiver implementation.
+- Treat `raw/` as generated machine course data, the configured `viewDirectory` as the user-facing copied view, and `src/`, `test/`, `config.json`, and `known-content.json` as the archiver implementation.
 - Preserve stable identifiers, source URLs, timestamps, hashes, and warning details. They are required for reliable diffs and indexing.
 - Preserve and display external links found in Canvas content. If externally hosted content cannot be downloaded, the visible link is still part of the archive and indexing result.
 - Read warning messages themselves; do not reduce them to warning counts.
