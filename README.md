@@ -2,6 +2,8 @@
 
 This is the active, deterministic Canvas archiver. It uses the pinned `canvas-cli` binary in `tools/canvas-cli/` for authentication, pagination, rate limiting, API reads, and file downloads.
 
+The archiver is written in strict TypeScript and runs directly on Bun. Install development dependencies with `bun install --frozen-lockfile`.
+
 ## Output design
 
 Raw machine data stays in the repository under `./raw`; the Finder-facing view is written outside the repository under `~/NUS Canvas` by default. Change `rawDirectory` and `viewDirectory` in `config.json` to customize them:
@@ -28,14 +30,15 @@ Credentials are not stored here. `canvas-cli` reads the API token from the macOS
 ## Commands
 
 ```sh
-npm run doctor
-npm run sync
-npm run sync -- --course CS2030S
-npm run sync -- --metadata-only
-npm run rebuild-views
-npm test
+bun run doctor
+bun run sync
+bun run sync --course CS2030S
+bun run sync --metadata-only
+bun run rebuild-views
+bun test
+bun run verify
 ```
 
-`npm run sync` is the full rebuild path: it reads Canvas, downloads missing raw attachments, writes normalized content, and regenerates every copied view. If a course’s `raw/<COURSE>/` directory is removed first, the next successful sync recreates it from scratch. `npm run rebuild-views` only regenerates views from the existing local raw corpus and does not contact Canvas.
+`bun run sync` is the full rebuild path: it reads Canvas, downloads missing raw attachments, writes normalized content, and regenerates every copied view. If a course’s `raw/<COURSE>/` directory is removed first, the next successful sync recreates it from scratch. `bun run rebuild-views` only regenerates views from the existing local raw corpus and does not contact Canvas.
 
 All Canvas operations in the implementation are reads. It intentionally excludes grades, submissions, quiz attempts, rosters, conversations, and every Canvas create/update/delete operation.

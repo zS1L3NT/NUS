@@ -5,12 +5,21 @@
   "type": "module",
   "description": "Deterministic, read-only NUS Canvas corpus builder using canvas-cli.",
   "scripts": {
-    "doctor": "node src/sync.mjs doctor",
-    "sync": "node src/sync.mjs sync",
-    "rebuild-views": "node src/sync.mjs rebuild-views",
-    "test": "node --test"
+    "check": "biome check .",
+    "check:write": "biome check --write .",
+    "doctor": "bun run src/sync.ts doctor",
+    "rebuild-views": "bun run src/sync.ts rebuild-views",
+    "sync": "bun run src/sync.ts sync",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "verify": "bun run check && bun run typecheck && bun test"
   },
   "engines": {
-    "node": ">=20"
+    "bun": ">=1.3.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.8",
+    "@types/bun": "1.3.14",
+    "typescript": "7.0.2"
   }
 }

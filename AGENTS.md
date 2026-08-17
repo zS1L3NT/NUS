@@ -2,6 +2,8 @@
 
 This repository has two distinct operating modes. Determine which mode the task belongs to before acting, and do not combine the modes unless the user explicitly asks for both.
 
+Read [STYLE.md](STYLE.md) for code style. Put future code-style changes in `STYLE.md`, not in this file.
+
 ## Rules for every agent
 
 - Never stage, unstage, commit, amend, reset, or otherwise manage Git state. Git staging and commits belong to the user.
@@ -20,8 +22,8 @@ Use this mode when changing the archiver, configuration, tests, documentation, e
 
 ### Source of truth
 
-- `src/sync.mjs`: Canvas collection and archive generation.
-- `src/lib.mjs`: normalization, hashing, text extraction, and comparison helpers.
+- `src/sync.ts`: Canvas collection and archive generation.
+- `src/lib.ts`: normalization, hashing, text extraction, and comparison helpers.
 - `config.json`: course scope and archive settings.
 - `known-content.json`: direct Canvas identifiers used when list endpoints are unavailable.
 - `test/`: regression tests.
@@ -46,11 +48,11 @@ Use this mode when changing the archiver, configuration, tests, documentation, e
 After implementation changes, run checks proportionate to the change:
 
 ```sh
-npm test
-npm run doctor
+bun test
+bun run doctor
 ```
 
-Run `npm run sync` only when a live, read-only refresh is needed. A successful sync should produce:
+Run `bun run sync` only when a live, read-only refresh is needed. A successful sync should produce:
 
 - `raw/INDEX.md`
 - one `raw/<COURSE>/INDEX.md` per collected course

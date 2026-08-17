@@ -3,3 +3,4 @@ raw/
 .DS_Store
 *.partial-*
 known-content.json
+/STYLE.md
